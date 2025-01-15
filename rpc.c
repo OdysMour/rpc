@@ -3,6 +3,12 @@
 #include <sys/wait.h>
 #include <sys/file.h>
 #include <time.h>
+#include <string.h>
+
+typedef struct {
+    int child_id;
+    char message[100];
+} child_message;
 
 void write_message(const char* filename, const char* process_name, pid_t pid) {
     FILE* file = fopen(filename, "a");
@@ -38,24 +44,25 @@ int main(int argc, char *argv[]) {
     const char* filename = argv[1];
     int N = atoi(argv[2]);
 
+    // Single pipe for all communication
+    int pipefd[2];
+    if (pipe(pipefd) == -1) {
+        perror("pipe");
+        return 1;
+    }
+
+    // Array to store child PIDs
+    pid_t child_pids[N];
+
     // Clear the file at start
     FILE* file = fopen(filename, "w");
     if (file) fclose(file);
 
-    // Create pipes for synchronization
-    int pipes[N][2];
-    for (int i = 0; i < N; i++) {
-        if (pipe(pipes[i]) == -1) {
-            perror("pipe");
-            return 1;
-        }
-    }
-
     // Father writes first
     write_message(filename, "F", getpid());
 
-    // Create children in order
-    for (int i = 1; i <= N; i++) {
+    // Create children
+    for (int i = 0; i < N; i++) {
         pid_t pid = fork();
         
         if (pid < 0) {
@@ -64,41 +71,59 @@ int main(int argc, char *argv[]) {
         }
         else if (pid == 0) {
             // Child process
-            char process_name[10];
-            snprintf(process_name, sizeof(process_name), "C%d", i);
+            close(pipefd[1]);  // Close write end
             
-            // Wait for signal from previous child (or father for C1)
-            //if (i > 1) {
-                char buf;
-                read(pipes[i-1][0], &buf, 1);
-           // }
-            
-            write_message(filename, process_name, getpid());
-            
-            // Signal next child
-            if (i < N) {
-                char buf = 'x';
-                write(pipes[i][1], &buf, 1);
+            child_message msg;
+            while (1) {
+                // Read message from parent
+                if (read(pipefd[0], &msg, sizeof(msg)) > 0) {
+                    if (msg.child_id == i) {  // Message is for this child
+                        // Write to file
+                        char process_name[10];
+                        snprintf(process_name, sizeof(process_name), "C%d", i+1);
+                        write_message(filename, process_name, getpid());
+                        
+                        // Send response
+                        char response[] = "done";
+                        write(pipefd[1], response, sizeof(response));
+                        break;
+                    }
+                }
             }
-
+            close(pipefd[0]);
+            close(pipefd[1]);  // Close write end
             return 0;
+        }
+        else {
+            // Parent stores child PID
+            child_pids[i] = pid;
         }
     }
 
-    // Father signals first child
-    char buf = 'x';
-    write(pipes[0][1], &buf, 1);
+    // Parent closes read end (will reopen later)
+
+    // Send messages to children
+    for (int i = 0; i < N; i++) {
+        child_message msg;
+        msg.child_id = i;
+        snprintf(msg.message, sizeof(msg.message), 
+                "Hello child, I am your father and I call you: C%d", i+1);
+        write(pipefd[1], &msg, sizeof(msg));
+    }
+
+    // Wait for responses
+    for (int i = 0; i < N; i++) {
+        char response[5];
+        read(pipefd[0], response, sizeof(response));
+    }
 
     // Wait for all children
     for (int i = 0; i < N; i++) {
-        wait(NULL);
+        waitpid(child_pids[i], NULL, 0);
     }
 
-    // Close all pipes
-    for (int i = 0; i < N; i++) {
-        close(pipes[i][0]);
-        close(pipes[i][1]);
-    }
+    close(pipefd[0]);
+    close(pipefd[1]);
 
     printf("Messages have been written to %s\n", filename);
     return 0;
