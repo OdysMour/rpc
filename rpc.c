@@ -1,36 +1,29 @@
 #include <stdio.h>
 #include <unistd.h>
 #include <sys/wait.h>
-<<<<<<< HEAD
 #include <sys/file.h>
 #include <time.h>
 #include <string.h>
 
-typedef struct {
-    int child_id;
-    char message[100];
-} child_message;
-=======
->>>>>>> parent of bb8ecb0 (first)
+void write_message(const char* filename, const char* process_name, pid_t pid) {
+    FILE* file = fopen(filename, "a");
+    if (!file) {
+        perror("fopen");
+        return;
+    }
 
-int main() {
-    int N;
-    printf("Εισάγετε τον αριθμό των παιδικών διεργασιών: ");
-    scanf("%d", &N);
-
-<<<<<<< HEAD
     // Lock the file
     int fd = fileno(file);
     flock(fd, LOCK_EX);
 
     // Get current time
-    time_t now = time(NULL);
-    struct tm* tm_info = localtime(&now);
-    char time_str[20];
-    strftime(time_str, sizeof(time_str), "%Y-%m-%d %H:%M:%S", tm_info);
+    //time_t now = time(NULL);
+    //struct tm* tm_info = localtime(&now);
+    //char time_str[20];
+    //strftime(time_str, sizeof(time_str), "%Y-%m-%d %H:%M:%S", tm_info);
 
     // Write message
-    fprintf(file, "[%s] %s (PID: %d) wrote this message\n", time_str, process_name, pid);
+    fprintf(file, "%d --> %s\n", pid, process_name);
 
     // Unlock and close
     flock(fd, LOCK_UN);
@@ -46,15 +39,18 @@ int main(int argc, char *argv[]) {
     const char* filename = argv[1];
     int N = atoi(argv[2]);
 
-    // Single pipe for all communication
-    int pipefd[2];
-    if (pipe(pipefd) == -1) {
-        perror("pipe");
-        return 1;
-    }
-
-    // Array to store child PIDs
+    // Array to store child PIDs and pipes
     pid_t child_pids[N];
+    int pipes1[N][2];
+    int pipes2[N][2];
+
+    // Create pipes
+    for (int i = 0; i < N; i++) {
+        if (pipe(pipes1[i]) == -1 || pipe(pipes2[i]) == -1) {
+            perror("pipe");
+            return 1;
+        }
+    }
 
     // Clear the file at start
     FILE* file = fopen(filename, "w");
@@ -65,46 +61,47 @@ int main(int argc, char *argv[]) {
 
     // Create children
     for (int i = 0; i < N; i++) {
-=======
-    for (int i = 1; i <= N; i++) {
->>>>>>> parent of bb8ecb0 (first)
         pid_t pid = fork();
         
         if (pid < 0) {
-            // Σφάλμα κατά τη δημιουργία διεργασίας
             perror("fork");
             return 1;
         }
         else if (pid == 0) {
-<<<<<<< HEAD
             // Child process
-            close(pipefd[1]);  // Close write end
-            
-            child_message msg;
-            while (1) {
-                // Read message from parent
-                if (read(pipefd[0], &msg, sizeof(msg)) > 0) {
-                    if (msg.child_id == i) {  // Message is for this child
-                        // Write to file
-                        char process_name[10];
-                        snprintf(process_name, sizeof(process_name), "C%d", i+1);
-                        write_message(filename, process_name, getpid());
-                        
-                        // Send response
-                        char response[] = "done";
-                        write(pipefd[1], response, sizeof(response));
-                        break;
-                    }
+            // Close all pipes except our own
+            for (int j = 0; j < N; j++) {
+                if (j != i) {
+                    close(pipes1[j][0]);
+                    close(pipes1[j][1]);
+                    close(pipes2[j][0]);
+                    close(pipes2[j][1]);
                 }
             }
-            close(pipefd[0]);
-            close(pipefd[1]);  // Close write end
-=======
-            // Παιδική διεργασία
-            printf("Παιδική διεργασία C%d (PID: %d) δημιουργήθηκε\n", i, getpid());
-            sleep(2);  // Προσομοίωση εργασίας
-            printf("Παιδική διεργασία C%d (PID: %d) τερματίζεται\n", i, getpid());
->>>>>>> parent of bb8ecb0 (first)
+            close(pipes1[i][1]);  // Close write end
+            close(pipes2[i][0]);  // Close read end
+            // Read message from parent
+            char message[100];
+            read(pipes1[i][0], message, sizeof(message));
+            
+            // Write to file
+            char process_name[10];
+            snprintf(process_name, sizeof(process_name), "C%d", i+1);
+            write_message(filename, process_name, getpid());
+            
+            // Print the requested format
+            //FILE* f = fopen(filename, "a");
+            //if (f) {
+            //    fprintf(f, "%d --> %s\n", getpid(), process_name);
+            //    fclose(f);
+            //}
+
+            // Send response to parent
+            char response[] = "done";
+            write(pipes2[i][1], response, sizeof(response));
+
+            close(pipes1[i][0]);
+            close(pipes2[i][1]);
             return 0;
         }
         else {
@@ -113,43 +110,33 @@ int main(int argc, char *argv[]) {
         }
     }
 
-<<<<<<< HEAD
-    // Parent closes read end (will reopen later)
-
     // Send messages to children
     for (int i = 0; i < N; i++) {
-        child_message msg;
-        msg.child_id = i;
-        snprintf(msg.message, sizeof(msg.message), 
+        char message[100];
+        snprintf(message, sizeof(message), 
                 "Hello child, I am your father and I call you: C%d", i+1);
-        write(pipefd[1], &msg, sizeof(msg));
+        write(pipes1[i][1], message, strlen(message)+1);
+        close(pipes1[i][0]);
+        close(pipes1[i][1]);
+        char response[5];
+        read(pipes2[i][0], response, sizeof(response));
+        close(pipes2[i][0]);
+        close(pipes2[i][1]);
     }
 
     // Wait for responses
-    for (int i = 0; i < N; i++) {
-        char response[5];
-        read(pipefd[0], response, sizeof(response));
-    }
+    //for (int i = 0; i < N; i++) {
+    //    char response[5];
+    //    read(pipes2[i][0], response, sizeof(response));
+    //    close(pipes2[i][0]);
+    //    close(pipes2[i][1]);
+    //}
 
     // Wait for all children
-=======
-    // Γονική διεργασία
-    printf("Γονική διεργασία F (PID: %d)\n", getpid());
-    
-    // Αναμονή για όλες τις παιδικές διεργασίες
->>>>>>> parent of bb8ecb0 (first)
     for (int i = 0; i < N; i++) {
         waitpid(child_pids[i], NULL, 0);
     }
-<<<<<<< HEAD
-
-    close(pipefd[0]);
-    close(pipefd[1]);
 
     printf("Messages have been written to %s\n", filename);
-=======
-    
-    printf("Όλες οι παιδικές διεργασίες ολοκληρώθηκαν\n");
->>>>>>> parent of bb8ecb0 (first)
     return 0;
 }
