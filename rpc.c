@@ -1,6 +1,7 @@
 #include <stdio.h>
 #include <unistd.h>
 #include <sys/wait.h>
+<<<<<<< HEAD
 #include <sys/file.h>
 #include <time.h>
 #include <string.h>
@@ -9,14 +10,15 @@ typedef struct {
     int child_id;
     char message[100];
 } child_message;
+=======
+>>>>>>> parent of bb8ecb0 (first)
 
-void write_message(const char* filename, const char* process_name, pid_t pid) {
-    FILE* file = fopen(filename, "a");
-    if (!file) {
-        perror("fopen");
-        return;
-    }
+int main() {
+    int N;
+    printf("Εισάγετε τον αριθμό των παιδικών διεργασιών: ");
+    scanf("%d", &N);
 
+<<<<<<< HEAD
     // Lock the file
     int fd = fileno(file);
     flock(fd, LOCK_EX);
@@ -63,13 +65,18 @@ int main(int argc, char *argv[]) {
 
     // Create children
     for (int i = 0; i < N; i++) {
+=======
+    for (int i = 1; i <= N; i++) {
+>>>>>>> parent of bb8ecb0 (first)
         pid_t pid = fork();
         
         if (pid < 0) {
+            // Σφάλμα κατά τη δημιουργία διεργασίας
             perror("fork");
             return 1;
         }
         else if (pid == 0) {
+<<<<<<< HEAD
             // Child process
             close(pipefd[1]);  // Close write end
             
@@ -92,6 +99,12 @@ int main(int argc, char *argv[]) {
             }
             close(pipefd[0]);
             close(pipefd[1]);  // Close write end
+=======
+            // Παιδική διεργασία
+            printf("Παιδική διεργασία C%d (PID: %d) δημιουργήθηκε\n", i, getpid());
+            sleep(2);  // Προσομοίωση εργασίας
+            printf("Παιδική διεργασία C%d (PID: %d) τερματίζεται\n", i, getpid());
+>>>>>>> parent of bb8ecb0 (first)
             return 0;
         }
         else {
@@ -100,6 +113,7 @@ int main(int argc, char *argv[]) {
         }
     }
 
+<<<<<<< HEAD
     // Parent closes read end (will reopen later)
 
     // Send messages to children
@@ -118,13 +132,24 @@ int main(int argc, char *argv[]) {
     }
 
     // Wait for all children
+=======
+    // Γονική διεργασία
+    printf("Γονική διεργασία F (PID: %d)\n", getpid());
+    
+    // Αναμονή για όλες τις παιδικές διεργασίες
+>>>>>>> parent of bb8ecb0 (first)
     for (int i = 0; i < N; i++) {
         waitpid(child_pids[i], NULL, 0);
     }
+<<<<<<< HEAD
 
     close(pipefd[0]);
     close(pipefd[1]);
 
     printf("Messages have been written to %s\n", filename);
+=======
+    
+    printf("Όλες οι παιδικές διεργασίες ολοκληρώθηκαν\n");
+>>>>>>> parent of bb8ecb0 (first)
     return 0;
 }
