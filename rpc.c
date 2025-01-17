@@ -5,6 +5,8 @@
 #include <time.h>
 #include <string.h>
 #include <sys/select.h>
+#include <sys/sem.h>
+#include <errno.h>
 
 void write_message(const char *filename, const char *process_name, pid_t pid)
 {
@@ -35,13 +37,21 @@ void write_message(const char *filename, const char *process_name, pid_t pid)
 
 int main(int argc, char *argv[])
 {
-    int desc_ready = 0;
+    int desc_ready,rc = 0;
     char response[5];
     if (argc != 3)
     {
         printf("Usage: %s <filename> <number_of_processes>\n", argv[0]);
         return 1;
     }
+
+/* Simple semaphore used here is actually a set of 1                  */
+int                     semaphoreId=-1;
+
+  semaphoreId = semget(IPC_PRIVATE, 1, S_IRUSR|S_IWUSR);
+  if (semaphoreId < 0) { printf("semget failed, err=%d\n",errno); exit(1); }
+  /* Set the semaphore (#0 in the set) count to 1. Simulate a mutex */
+  rc = semctl(semaphoreId, 0, SETVAL, (int)1);
 
     const char *filename = argv[1];
     int N = atoi(argv[2]);
@@ -99,12 +109,22 @@ int main(int argc, char *argv[])
             char message[100];
             read(pipes1[i][0], message, sizeof(message));
 
+            // Sem
+               int   rc;
+               struct sembuf lockOperation = { 0, -i-1, 0};
+               struct sembuf unlockOperation = { 0, (i+2)%(N+1), 0};
+               rc = semop(semaphoreId, &lockOperation, 1);
+            
+
+
             // Write to file
             char process_name[10];
             snprintf(process_name, sizeof(process_name), "C%d", i + 1);
             write_message(filename, process_name, getpid());
+sleep(2);
+               rc = semop(semaphoreId, &unlockOperation, 1);
 
-            sleep(8);
+            
             // Send response to parent
             char response[] = "done";
             write(pipes2[i][1], response, sizeof(response));
@@ -119,6 +139,11 @@ int main(int argc, char *argv[])
             child_pids[i] = pid;
         }
     }
+/* Simple lock operation. 0=which-semaphore, -1=decrement, 0=noflags  */
+//struct sembuf lockOperation = { 0, -1, 0};
+/* Simple unlock operation. 0=which-semaphore, 1=increment, 0=noflags */
+//struct sembuf unlockOperation = { 0, 1, 0};
+
     // Add select() to see if children are done
     // Create a set of file descriptors to watch
 
