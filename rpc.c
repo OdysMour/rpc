@@ -40,25 +40,13 @@ void write_message(const char *filename, const char *process_name, pid_t pid)
 
 int main(int argc, char *argv[])
 {
-    int desc_ready, rc = 0;
+    int desc_ready, max_rd, work_rd, rc, turn = 0;
     char response[5];
     if (argc != 3)
     {
         printf("Usage: %s <filename> <number_of_processes>\n", argv[0]);
         return 1;
     }
-
-    /* Simple semaphore used here is actually a set of 1                  */
-    int semaphoreId = -1;
-
-    semaphoreId = semget(IPC_PRIVATE, 1, S_IRUSR | S_IWUSR);
-    if (semaphoreId < 0)
-    {
-        printf("semget failed, err=%d\n", errno);
-        exit(1);
-    }
-    /* Set the semaphore (#0 in the set) count to 1. Simulate a mutex */
-    rc = semctl(semaphoreId, 0, SETVAL, (int)1);
 
     const char *filename = argv[1];
     int N = atoi(argv[2]);
@@ -116,34 +104,13 @@ int main(int argc, char *argv[])
             do
             {
                 char message[100];
-                // Sem
-                int rc;
-                struct sembuf lockOperation = {0, -i - 1, 0};
-                struct sembuf unlockOperation = {0, ((i + 2) % (N + 1)) == 0 ? 1 : (i + 2) % (N + 1), 0};
-                // fprintf(stderr, "C%d --> %d\n", i + 1, semctl(semaphoreId, 0, GETVAL));
-
                 read(pipes1[i][0], message, sizeof(message));
-                fprintf(stderr, "C%d: %s, semval=%d\n", i + 1, message, semctl(semaphoreId, 0, GETVAL));
-
-                rc = semop(semaphoreId, &lockOperation, 1);
-                if (rc < 0)
-                {
-                    perror("  semop failed");
-                    break;
-                }
-                // fprintf(stderr, "C%d --> %d\n", i + 1, semctl(semaphoreId, 0, GETVAL));
 
                 // Write to file
                 char process_name[12];
                 snprintf(process_name, sizeof(process_name), "C%d", i + 1);
                 write_message(filename, process_name, getpid());
-                char process_num[12];
-                snprintf(process_num, sizeof(process_num), "%d", ((i + 2) % (N + 1)) == 0 ? 1 : (i + 2) % (N + 1));
-                write_message(filename, process_num, getpid());
-                //sleep(0.1);
-                rc = semop(semaphoreId, &unlockOperation, 1);
-                // fprintf(stderr, "C%d --> %d\n", i + 1, semctl(semaphoreId, 0, GETVAL));
-
+                sleep(1);
                 // Send response to parent
                 char response[] = "done";
                 write(pipes2[i][1], response, sizeof(response));
@@ -158,30 +125,28 @@ int main(int argc, char *argv[])
             child_pids[i] = pid;
         }
     }
-    /* Simple lock operation. 0=which-semaphore, -1=decrement, 0=noflags  */
-    // struct sembuf lockOperation = { 0, -1, 0};
-    /* Simple unlock operation. 0=which-semaphore, 1=increment, 0=noflags */
-    // struct sembuf unlockOperation = { 0, 1, 0};
 
     // Add select() to see if children are done
     // Create a set of file descriptors to watch
     // Send messages to children
+
+    sleep(5);
     char message[100];
-    for (int i = 0; i < N; i++)
-    {
-        snprintf(message, sizeof(message),
-                 "Hello child, I am your father and I call you: C%d", i + 1);
-        write(pipes1[i][1], message, strlen(message));
-        close(pipes1[i][0]);
-        // char response[5];
-        // read(pipes2[i][0], response, sizeof(response));
-        // close(pipes2[i][0]);
-        close(pipes2[i][1]);
-    }
+    // for (int i = 0; i < N; i++)
+    //{
+    //     snprintf(message, sizeof(message),
+    //              "Hello child, I am your father and I call you: C%d", i + 1);
+    //   write(pipes1[i][1], message, strlen(message));
+    //   close(pipes1[i][0]);
+    // char response[5];
+    // read(pipes2[i][0], response, sizeof(response));
+    // close(pipes2[i][0]);
+    //   close(pipes2[i][1]);
+    // }
 
     fd_set read_set, working_set;
     struct timeval timeout;
-    int max_fd = sizeof(pipes2);
+    int max_fd;
 
     // Clear the set
     FD_ZERO(&read_set);
@@ -196,67 +161,78 @@ int main(int argc, char *argv[])
             max_fd = pipes2[i][0];
         }
     }
-
+    int fin;
     // Set timeout
     timeout.tv_sec = 60;
     timeout.tv_usec = 0;
-
     do
     {
+        for (int i = 0; i < N; i++)
+        {
+            snprintf(message, sizeof(message),
+                     "Hello child, I am your father and I call you: C%d", i + 1);
+            printf("Hello child, I am your father and I call you: C%d\n", i + 1);
+
+            write(pipes1[i][1], message, strlen(message));
+        };
+        FD_ZERO(&working_set);
         memcpy(&working_set, &read_set, sizeof(read_set));
-
-        printf("Waiting on select()...\n");
-        /* https://www.ibm.com/docs/en/ztpf/2024?topic=apis-select-monitor-read-write-exception-status */
-        // Wait for any pipe to be ready
-        int ret = select(max_fd + 1, &working_set, NULL, NULL, &timeout);
-        /**********************************************************/
-        /* Check to see if the select call failed.                */
-        /**********************************************************/
-        if (ret < 0)
+        timeout.tv_sec = 60;
+        timeout.tv_usec = 0;
+        max_rd = N;
+        work_rd = max_rd;
+        do
         {
-            perror("  select() failed");
-            break;
-        }
 
-        /**********************************************************/
-        /* Check to see if the 3 minute time out expired.         */
-        /**********************************************************/
-        if (ret == 0)
-        {
-            printf("  select() timed out.  End program.\n");
-            break;
-        }
-
-        desc_ready = ret;
-        fprintf(stderr, "%d\n", desc_ready);
-
-        for (int i = 0; i <= max_fd && desc_ready > 0; i++)
-        {
-            if (FD_ISSET(pipes2[i][0], &working_set))
+            printf("Waiting on select()...\n");
+            /* https://www.ibm.com/docs/en/ztpf/2024?topic=apis-select-monitor-read-write-exception-status */
+            // Wait for any pipe to be ready
+            int ret = select(max_fd + 1, &working_set, NULL, NULL, NULL);
+            /**********************************************************/
+            /* Check to see if the select call failed.                */
+            /**********************************************************/
+            if (ret < 0)
             {
-                desc_ready--;
-                do
+                perror("  select() failed");
+                break;
+            }
+
+            /**********************************************************/
+            /* Check to see if the 3 minute time out expired.         */
+            /**********************************************************/
+            if (ret == 0)
+            {
+                printf("  select() timed out.  End program.\n");
+                break;
+            }
+
+            desc_ready = ret;
+            fprintf(stderr, "%d\n", desc_ready);
+            fprintf(stderr, "%d\n", max_fd);
+
+            for (int i = 0; i <= N && desc_ready > 0; i++)
+            {
+                if (FD_ISSET(pipes2[i][0], &working_set))
                 {
+                    desc_ready--;
                     ssize_t rc = read(pipes2[i][0], response, sizeof(response));
                     if (rc < 0)
                     {
                         fprintf(stderr, "read error on pipe %d: %s\n", i, strerror(errno));
                         break;
                     }
-                    ssize_t len = rc;
-                    snprintf(message, sizeof(message),
-                             "Hello child, I am your father and I call you: C%d", i + 1);
-                    rc = write(pipes1[i][1], message, strlen(message));
-                    if (rc <= 0)
-                    {
-                        perror("write");
-                        break;
-                    }
-                    break;
-                } while (1);
-            }
-        }
+                //    write(pipes1[i][1], message, strlen(message));
 
+                    FD_CLR(pipes2[i][0], &working_set);
+                    max_rd--;
+                    // fprintf(stderr, "%d\n", max_rd);
+                    // printf("read pipes if...\n");
+                }
+                printf("read pipes loop...\n");
+            }
+            printf("after read pipe loop...\n");
+
+        } while (max_rd > 0);
     } while (1);
     // Wait for all children
     for (int i = 0; i < N; i++)
