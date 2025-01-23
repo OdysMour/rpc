@@ -5,11 +5,26 @@
 #include <time.h>
 #include <string.h>
 #include <sys/select.h>
-#include <sys/sem.h>
 #include <sys/ipc.h>
 #include <errno.h>
 #include <sys/stat.h>
 #include <stdlib.h>
+#include <signal.h>
+#include <stdatomic.h>
+#include <sys/mman.h>
+
+typedef struct
+{
+    atomic_int counter;
+    atomic_int shutdown;
+} SharedState;
+
+volatile sig_atomic_t shutdown_requested = 0;
+
+void handle_signal(int sig)
+{
+    shutdown_requested = 1;
+}
 
 void write_message(const char *filename, const char *process_name, pid_t pid)
 {
@@ -50,6 +65,16 @@ int main(int argc, char *argv[])
 
     const char *filename = argv[1];
     int N = atoi(argv[2]);
+
+    // Set up shared memory
+    SharedState *state = mmap(NULL, sizeof(SharedState),
+                              PROT_READ | PROT_WRITE,
+                              MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+    atomic_init(&state->counter, 0);
+    atomic_init(&state->shutdown, 0);
+
+    signal(SIGINT, handle_signal);
+    signal(SIGTERM, handle_signal);
 
     // Array to store child PIDs and pipes
     pid_t child_pids[N];
@@ -100,29 +125,49 @@ int main(int argc, char *argv[])
             }
             close(pipes1[i][1]); // Close write end
             close(pipes2[i][0]); // Close read end
-            // Read message from parent
-            do
+                                 // Read message from parent
+            char process_name[12];
+            snprintf(process_name, sizeof(process_name), "C%d", i + 1);
+
+            while (1)
             {
                 char message[100];
-                read(pipes1[i][0], message, sizeof(message));
+                ssize_t bytes = read(pipes1[i][0], message, sizeof(message));
+                if (bytes <= 0)
+                    break;
 
-                // Write to file
-                char process_name[12];
-                snprintf(process_name, sizeof(process_name), "C%d", i + 1);
-                write_message(filename, process_name, getpid());
+                int expected = i;
+                do
+                {
+                    if (atomic_load(&state->counter) == i)
+                    {
+                        write_message(filename, process_name, getpid());
+                        atomic_store(&state->counter, (i + 1) % N);
+                        break;
+                    }
+                    usleep(1000);
+                } while (1);
                 sleep(1);
-                // Send response to parent
-                char response[] = "done";
-                write(pipes2[i][1], response, sizeof(response));
-            } while (1);
-            // close(pipes1[i][0]);
-            // close(pipes2[i][1]);
-            // return 0;
+                write(pipes2[i][1], "done", 5);
+            }
+
+            // Wait for all children to complete cycle
+            // while (!atomic_load(&state->shutdown) &&
+            //        atomic_load(&state->counter) != 0)
+            // {
+            //     usleep(1000);
+            //  }
+
+            close(pipes1[i][0]);
+            close(pipes2[i][1]);
+            exit(0);
         }
         else
         {
             // Parent stores child PID
             child_pids[i] = pid;
+            close(pipes1[i][0]); // Close read end of pipes1
+            close(pipes2[i][1]); // Close write end of pipes2
         }
     }
 
@@ -146,7 +191,7 @@ int main(int argc, char *argv[])
 
     fd_set read_set, working_set;
     struct timeval timeout;
-    int max_fd;
+    int max_fd = 0;
 
     // Clear the set
     FD_ZERO(&read_set);
@@ -165,8 +210,11 @@ int main(int argc, char *argv[])
     // Set timeout
     timeout.tv_sec = 60;
     timeout.tv_usec = 0;
-    do
+
+    // Main work loop
+    while (!shutdown_requested)
     {
+        // Send messages to all children
         for (int i = 0; i < N; i++)
         {
             snprintf(message, sizeof(message),
@@ -175,25 +223,30 @@ int main(int argc, char *argv[])
 
             write(pipes1[i][1], message, strlen(message));
         };
-        FD_ZERO(&working_set);
-        memcpy(&working_set, &read_set, sizeof(read_set));
-        timeout.tv_sec = 60;
-        timeout.tv_usec = 0;
+
+        // Wait for all responses
+
         max_rd = N;
         work_rd = max_rd;
-        do
+        int responses = 0;
+        while (responses < N && !shutdown_requested)
         {
-
+            FD_ZERO(&working_set);
+            memcpy(&working_set, &read_set, sizeof(read_set));
+            timeout.tv_sec = 60;
+            timeout.tv_usec = 0;
             printf("Waiting on select()...\n");
             /* https://www.ibm.com/docs/en/ztpf/2024?topic=apis-select-monitor-read-write-exception-status */
             // Wait for any pipe to be ready
-            int ret = select(max_fd + 1, &working_set, NULL, NULL, NULL);
+            int ret = select(max_fd + 1, &working_set, NULL, NULL, &timeout);
             /**********************************************************/
             /* Check to see if the select call failed.                */
             /**********************************************************/
             if (ret < 0)
             {
-                perror("  select() failed");
+                if (errno == EINTR)
+                    continue;
+                perror("select");
                 break;
             }
 
@@ -207,10 +260,10 @@ int main(int argc, char *argv[])
             }
 
             desc_ready = ret;
-            fprintf(stderr, "%d\n", desc_ready);
-            fprintf(stderr, "%d\n", max_fd);
+            // fprintf(stderr, "%d\n", desc_ready);
+            // fprintf(stderr, "%d\n", max_fd);
 
-            for (int i = 0; i <= N && desc_ready > 0; i++)
+            for (int i = 0; i < N && desc_ready > 0; i++)
             {
                 if (FD_ISSET(pipes2[i][0], &working_set))
                 {
@@ -221,25 +274,46 @@ int main(int argc, char *argv[])
                         fprintf(stderr, "read error on pipe %d: %s\n", i, strerror(errno));
                         break;
                     }
-                //    write(pipes1[i][1], message, strlen(message));
+                    //    write(pipes1[i][1], message, strlen(message));
 
-                    FD_CLR(pipes2[i][0], &working_set);
-                    max_rd--;
-                    // fprintf(stderr, "%d\n", max_rd);
-                    // printf("read pipes if...\n");
+                    // FD_CLR(pipes2[i][0], &working_set);
+                    // max_rd--;
+                    //  fprintf(stderr, "%d\n", max_rd);
+                    //  printf("read pipes if...\n");
+                    responses++;
+                    ret--;
                 }
-                printf("read pipes loop...\n");
+                // printf("read pipes loop...\n");
             }
-            printf("after read pipe loop...\n");
+            // printf("after read pipe loop...\n");
+        }
+    }
+    // Graceful shutdown
+    printf("\nInitiating shutdown...\n");
+    fflush(stdout); // Force flush output
 
-        } while (max_rd > 0);
-    } while (1);
-    // Wait for all children
+    // Close communication channels
     for (int i = 0; i < N; i++)
     {
-        waitpid(child_pids[i], NULL, 0);
+        close(pipes1[i][1]);
+        close(pipes2[i][0]);
     }
 
-    printf("Messages have been written to %s\n", filename);
+    // Wait for children to exit
+    int active_children = N;
+    while (active_children > 0)
+    {
+        pid_t pid = waitpid(-1, NULL, WNOHANG);
+        if (pid > 0)
+        {
+            active_children--;
+            printf("Child %d exited\n", pid);
+            fflush(stdout); // Flush after each message
+        }
+        usleep(100000);
+    }
+    munmap(state, sizeof(SharedState));
+
+    printf("All children exited. Clean shutdown complete.\n");
     return 0;
 }
